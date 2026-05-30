@@ -1333,6 +1333,7 @@
     const storageKey = "dailyWorkHub.v1";
     const legacyTodoKey = "todo_app_ls_v1";
     const legacyTodoUrl = "https://dfg2fg42.github.io/todo-list/";
+    let legacyTodoSourceKey = legacyTodoKey;
     const uid = () => {
       if (window.crypto && typeof window.crypto.randomUUID === "function") {
         return window.crypto.randomUUID();
@@ -1559,15 +1560,61 @@
       return `${year}-${month}-${day}`;
     }
 
+    function normalizeLegacyTodoData(value) {
+      if (Array.isArray(value)) return value;
+      if (value && Array.isArray(value.tasks)) return value.tasks;
+      if (value && Array.isArray(value.todos)) return value.todos;
+      if (value && Array.isArray(value.items)) return value.items;
+      return [];
+    }
+
+    function looksLikeTodoList(list) {
+      if (!Array.isArray(list) || !list.length) return false;
+      return list.some((item) => {
+        if (!item || typeof item !== "object") return false;
+        const hasTitle = typeof item.title === "string" || typeof item.text === "string" || typeof item.name === "string";
+        const hasTodoField = "done" in item || "completed" in item || "startDate" in item || "endDate" in item || "reminderAt" in item || "memo" in item || "category" in item;
+        return hasTitle && hasTodoField;
+      });
+    }
+
+    function normalizeLegacyTodoItem(item) {
+      return {
+        ...item,
+        title: item.title || item.text || item.name || "제목 없음",
+        done: Boolean(item.done || item.completed),
+        category: item.category || item.group || "",
+        startDate: item.startDate || item.start || item.date || "",
+        endDate: item.endDate || item.end || item.dueDate || item.date || "",
+        reminderAt: item.reminderAt || item.reminder || "",
+        memo: item.memo || item.note || ""
+      };
+    }
+
     function loadLegacyTodos() {
+      legacyTodoSourceKey = legacyTodoKey;
+      const candidates = [legacyTodoKey];
       try {
-        const raw = localStorage.getItem(legacyTodoKey);
-        if (!raw) return [];
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : [];
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const key = localStorage.key(i);
+          if (key && !candidates.includes(key)) candidates.push(key);
+        }
+
+        for (const key of candidates) {
+          const raw = localStorage.getItem(key);
+          if (!raw) continue;
+          let parsed;
+          try { parsed = JSON.parse(raw); }
+          catch (error) { continue; }
+          const list = normalizeLegacyTodoData(parsed);
+          if (!looksLikeTodoList(list)) continue;
+          legacyTodoSourceKey = key;
+          return list.map(normalizeLegacyTodoItem);
+        }
       } catch (error) {
         return [];
       }
+      return [];
     }
 
     function isLegacyTodoDueToday(task) {
@@ -1596,13 +1643,15 @@
       `;
 
       if (!legacyTodos.length) {
-        legacyTodoStatus.textContent = "외부 GitHub Pages 앱의 저장소는 로컬 파일에서 직접 읽을 수 없습니다.";
-        legacyTodoList.innerHTML = `<div class="empty">To-Do 앱 데이터는 ${legacyTodoUrl} origin에 저장됩니다. 허브도 같은 GitHub Pages origin에서 열면 자동 연동됩니다.</div>`;
+        legacyTodoStatus.textContent = location.origin === "https://dfg2fg42.github.io"
+          ? "같은 GitHub Pages origin입니다. To-Do 저장 키를 찾지 못했습니다."
+          : "로컬 파일에서는 GitHub Pages To-Do 저장소를 직접 읽을 수 없습니다.";
+        legacyTodoList.innerHTML = `<div class="empty">To-Do 앱을 같은 Chrome 프로필에서 한 번 열어 저장된 항목이 있는지 확인해 주세요. 허브는 localStorage 안의 To-Do 형태 데이터를 자동 탐색합니다.</div>`;
         $("#importLegacyTodoBtn").disabled = true;
         return;
       }
 
-      legacyTodoStatus.textContent = `기존 To-Do 저장소(${legacyTodoKey})를 읽었습니다.`;
+      legacyTodoStatus.textContent = `기존 To-Do 저장소(${legacyTodoSourceKey})를 읽었습니다.`;
       $("#importLegacyTodoBtn").disabled = stats.dueToday.length === 0;
 
       const visible = stats.dueToday.slice(0, 5);
