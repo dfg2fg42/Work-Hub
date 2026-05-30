@@ -1334,6 +1334,7 @@
     const legacyTodoKey = "todo_app_ls_v1";
     const legacyTodoUrl = "https://dfg2fg42.github.io/todo-list/";
     let legacyTodoSourceKey = legacyTodoKey;
+    let legacyStorageInfo = "";
     const uid = () => {
       if (window.crypto && typeof window.crypto.randomUUID === "function") {
         return window.crypto.randomUUID();
@@ -1579,20 +1580,110 @@
     }
 
     function normalizeLegacyTodoItem(item) {
+      const normalizeDate = (value) => typeof value === "string" ? value.slice(0, 10) : "";
       return {
         ...item,
         title: item.title || item.text || item.name || "제목 없음",
         done: Boolean(item.done || item.completed),
         category: item.category || item.group || "",
-        startDate: item.startDate || item.start || item.date || "",
-        endDate: item.endDate || item.end || item.dueDate || item.date || "",
+        startDate: normalizeDate(item.startDate || item.start || item.date || ""),
+        endDate: normalizeDate(item.endDate || item.end || item.dueDate || item.date || ""),
         reminderAt: item.reminderAt || item.reminder || "",
         memo: item.memo || item.note || ""
       };
     }
 
-    function loadLegacyTodos() {
+    function legacyDebugInfo() {
+      const localKeys = [];
+      try {
+        for (let i = 0; i < localStorage.length; i += 1) localKeys.push(localStorage.key(i));
+      } catch (error) {}
+      return `현재 origin: ${location.origin}<br>localStorage 키: ${localKeys.length ? localKeys.join(", ") : "없음"}${legacyStorageInfo ? `<br>${legacyStorageInfo}` : ""}`;
+    }
+
+    function requestToPromise(request) {
+      return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    function openIndexedDb(name) {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(name);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+        request.onblocked = () => reject(new Error("blocked"));
+      });
+    }
+
+    function collectTodoCandidates(value) {
+      const direct = normalizeLegacyTodoData(value);
+      if (looksLikeTodoList(direct)) return direct;
+      if (Array.isArray(value) && looksLikeTodoList(value)) return value;
+      if (value && typeof value === "object") {
+        const nested = Object.values(value).flatMap((entry) => normalizeLegacyTodoData(entry));
+        if (looksLikeTodoList(nested)) return nested;
+      }
+      return [];
+    }
+
+    async function loadLegacyTodosFromIndexedDb() {
+      if (!window.indexedDB || typeof indexedDB.databases !== "function") return [];
+      const databaseNames = [];
+      try {
+        const databases = await indexedDB.databases();
+        databases.forEach((database) => {
+          if (database && database.name) databaseNames.push(database.name);
+        });
+      } catch (error) {
+        legacyStorageInfo = "IndexedDB 목록 조회 불가";
+        return [];
+      }
+
+      legacyStorageInfo = databaseNames.length ? `IndexedDB DB: ${databaseNames.join(", ")}` : "IndexedDB DB: 없음";
+      for (const dbName of databaseNames) {
+        let db;
+        try {
+          db = await openIndexedDb(dbName);
+          const storeNames = [...db.objectStoreNames];
+          for (const storeName of storeNames) {
+            let rows = [];
+            try {
+              const tx = db.transaction(storeName, "readonly");
+              const store = tx.objectStore(storeName);
+              rows = await requestToPromise(store.getAll());
+            } catch (error) {
+              continue;
+            }
+
+            if (looksLikeTodoList(rows)) {
+              legacyTodoSourceKey = `IndexedDB:${dbName}/${storeName}`;
+              db.close();
+              return rows.map(normalizeLegacyTodoItem);
+            }
+
+            for (const row of rows) {
+              const list = collectTodoCandidates(row);
+              if (looksLikeTodoList(list)) {
+                legacyTodoSourceKey = `IndexedDB:${dbName}/${storeName}`;
+                db.close();
+                return list.map(normalizeLegacyTodoItem);
+              }
+            }
+          }
+        } catch (error) {
+          continue;
+        } finally {
+          if (db) db.close();
+        }
+      }
+      return [];
+    }
+
+    async function loadLegacyTodos() {
       legacyTodoSourceKey = legacyTodoKey;
+      legacyStorageInfo = "";
       const candidates = [legacyTodoKey];
       try {
         for (let i = 0; i < localStorage.length; i += 1) {
@@ -1606,15 +1697,15 @@
           let parsed;
           try { parsed = JSON.parse(raw); }
           catch (error) { continue; }
-          const list = normalizeLegacyTodoData(parsed);
+          const list = collectTodoCandidates(parsed);
           if (!looksLikeTodoList(list)) continue;
-          legacyTodoSourceKey = key;
+          legacyTodoSourceKey = `localStorage:${key}`;
           return list.map(normalizeLegacyTodoItem);
         }
       } catch (error) {
         return [];
       }
-      return [];
+      return await loadLegacyTodosFromIndexedDb();
     }
 
     function isLegacyTodoDueToday(task) {
@@ -1633,8 +1724,9 @@
       return { total: active.length, open: open.length, dueToday };
     }
 
-    function renderLegacyTodos() {
-      legacyTodos = loadLegacyTodos();
+    async function renderLegacyTodos() {
+      legacyTodoStatus.textContent = "저장소 확인 중";
+      legacyTodos = await loadLegacyTodos();
       const stats = legacyStats();
       legacyTodoStats.innerHTML = `
         <div class="legacy-stat"><b>${stats.total}</b><span>전체</span></div>
@@ -1646,7 +1738,7 @@
         legacyTodoStatus.textContent = location.origin === "https://dfg2fg42.github.io"
           ? "같은 GitHub Pages origin입니다. To-Do 저장 키를 찾지 못했습니다."
           : "로컬 파일에서는 GitHub Pages To-Do 저장소를 직접 읽을 수 없습니다.";
-        legacyTodoList.innerHTML = `<div class="empty">To-Do 앱을 같은 Chrome 프로필에서 한 번 열어 저장된 항목이 있는지 확인해 주세요. 허브는 localStorage 안의 To-Do 형태 데이터를 자동 탐색합니다.</div>`;
+        legacyTodoList.innerHTML = `<div class="empty">To-Do 앱을 같은 Chrome 프로필에서 한 번 열어 저장된 항목이 있는지 확인해 주세요. 허브는 localStorage와 IndexedDB의 To-Do 형태 데이터를 자동 탐색합니다.<br><br>${legacyDebugInfo()}</div>`;
         $("#importLegacyTodoBtn").disabled = true;
         return;
       }
@@ -2029,9 +2121,9 @@
       document.body.style.overflow = "";
     }
 
-    function renderAll() {
+    async function renderAll() {
       shiftSelect.value = state.shift;
-      renderLegacyTodos();
+      await renderLegacyTodos();
       renderTasks();
       renderEvents();
       renderFiles();
