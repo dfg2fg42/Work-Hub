@@ -5159,6 +5159,7 @@ async function syncRepeatTasks() {
 
     const files = [];
 
+    const hadStoredState = localStorage.getItem(storageKey) !== null;
     let state = loadState();
     let legacyTodos = [];
     let noteEditingId = null;
@@ -5253,6 +5254,8 @@ async function syncRepeatTasks() {
     const fileSearch = $("#fileSearch");
     const fileFilter = $("#fileFilter");
     let localBridgeReady = false;
+    let persistentSaveTimer = null;
+    let persistentLoadChecked = false;
 
     function removeSampleEntries(savedState) {
       return {
@@ -5287,6 +5290,7 @@ async function syncRepeatTasks() {
 
     function saveState(message = "저장됨") {
       localStorage.setItem(storageKey, JSON.stringify(state));
+      schedulePersistentSave();
       savedStatus.textContent = message;
       window.clearTimeout(saveState.timer);
       saveState.timer = window.setTimeout(() => {
@@ -5309,6 +5313,17 @@ async function syncRepeatTasks() {
       }, {});
     }
 
+    function buildHubSnapshot() {
+      return {
+        app: "Work Hub",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        storageKey,
+        state: clone(state),
+        localStorageItems: collectKnownLocalStorage()
+      };
+    }
+
     function downloadJsonFile(filename, data) {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -5320,14 +5335,7 @@ async function syncRepeatTasks() {
     }
 
     function exportHubBackup() {
-      const backup = {
-        app: "Work Hub",
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        storageKey,
-        state: clone(state),
-        localStorageItems: collectKnownLocalStorage()
-      };
+      const backup = buildHubSnapshot();
       downloadJsonFile(`work_hub_backup_${backupStamp()}.json`, backup);
       saveState("백업 저장됨");
     }
@@ -5349,10 +5357,10 @@ async function syncRepeatTasks() {
       });
     }
 
-    function applyHubBackup(data) {
+    function applyHubBackup(data, options = {}) {
       const backupState = extractBackupState(data);
       if (!backupState) {
-        alert("업무 허브 백업 파일을 찾을 수 없습니다.");
+        if (!options.silent) alert("업무 허브 백업 파일을 찾을 수 없습니다.");
         return;
       }
       const nextState = removeSampleEntries({
@@ -5370,12 +5378,12 @@ async function syncRepeatTasks() {
       });
       state = nextState;
       restoreKnownLocalStorage(data);
-      saveState("백업 불러옴");
+      saveState(options.message || "백업 불러옴");
       renderMemo();
       resetNoteForm();
       closeFileNameDialog();
       renderAll();
-      alert("업무 허브 백업을 불러왔습니다.");
+      if (!options.silent) alert("업무 허브 백업을 불러왔습니다.");
     }
 
     function importHubBackupFile(file) {
@@ -6259,6 +6267,40 @@ async function syncRepeatTasks() {
         localBridgeReady = false;
       }
       return localBridgeReady;
+    }
+
+    function schedulePersistentSave() {
+      window.clearTimeout(persistentSaveTimer);
+      persistentSaveTimer = window.setTimeout(writePersistentHubData, 350);
+    }
+
+    async function writePersistentHubData() {
+      try {
+        if (!localBridgeReady) {
+          const ready = await refreshLocalBridgeStatus();
+          if (!ready) return;
+        }
+        await callLocalBridge("/write-data", { json: JSON.stringify(buildHubSnapshot()) });
+      } catch (error) {
+      }
+    }
+
+    async function restorePersistentHubDataIfNeeded() {
+      if (persistentLoadChecked) return;
+      if (hadStoredState) return;
+      try {
+        if (!localBridgeReady) {
+          const ready = await refreshLocalBridgeStatus();
+          if (!ready) return;
+        }
+        persistentLoadChecked = true;
+        const result = await callLocalBridge("/read-data");
+        if (result && result.exists) {
+          const data = result.json ? JSON.parse(result.json) : result.data;
+          if (data) applyHubBackup(data, { silent: true, message: "로컬 데이터 복원됨" });
+        }
+      } catch (error) {
+      }
     }
 
     function updateFileShortcut(fileId, path, name = "") {
@@ -7402,8 +7444,15 @@ async function syncRepeatTasks() {
       alert("브라우저 보안상 Windows 로컬 파일 경로를 직접 열 수 없습니다. '업무허브 실행.bat'으로 허브를 열어 로컬 실행기를 켜 주세요.");
     });
 
-    refreshLocalBridgeStatus();
-    window.setTimeout(refreshLocalBridgeStatus, 1200);
+    function syncPersistentDataOnStartup() {
+      if (hadStoredState) writePersistentHubData();
+      else restorePersistentHubDataIfNeeded();
+    }
+
+    refreshLocalBridgeStatus().then(syncPersistentDataOnStartup);
+    window.setTimeout(() => {
+      refreshLocalBridgeStatus().then(syncPersistentDataOnStartup);
+    }, 1200);
     setToday();
     renderMemo();
     renderAll();
